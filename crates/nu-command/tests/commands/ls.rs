@@ -780,3 +780,57 @@ fn consistent_list_order() {
         assert_eq!(no_arg.out, with_arg.out);
     })
 }
+
+#[test]
+fn list_with_sequences_flag() {
+    Playground::setup("ls_test_sequences", |dirs, sandbox| {
+        sandbox.with_files(&[
+            EmptyFile("aaa.001.tif"),
+            EmptyFile("aaa.002.tif"),
+            EmptyFile("aaa.003.tif"),
+            EmptyFile("aaa.004.tif"),
+            EmptyFile("aaa.005.tif"),
+            EmptyFile("foo_bar.exr"),
+        ]);
+
+        let actual = nu!(cwd: dirs.test(), "ls --sequences | get name | to text");
+
+        // Should contain the sequence notation
+        assert!(actual.out.contains("aaa.***.tif@1-5"));
+        // Should contain non-sequence file
+        assert!(actual.out.contains("foo_bar.exr"));
+    })
+}
+
+#[test]
+fn list_with_sequences_flag_with_gaps() {
+    Playground::setup("ls_test_sequences_gaps", |dirs, sandbox| {
+        sandbox.with_files(&[
+            EmptyFile("frame.0001.exr"),
+            EmptyFile("frame.0002.exr"),
+            EmptyFile("frame.0003.exr"),
+            // Missing frame 4
+            EmptyFile("frame.0005.exr"),
+            EmptyFile("frame.0006.exr"),
+        ]);
+
+        let actual = nu!(cwd: dirs.test(), "ls --sequences | get name | to text");
+
+        // Should detect the gap and show separate ranges
+        assert!(actual.out.contains("frame.****"));
+        assert!(actual.out.contains("@1-3,5-6"));
+    })
+}
+
+#[test]
+fn list_with_sequences_flag_single_file() {
+    Playground::setup("ls_test_sequences_single", |dirs, sandbox| {
+        sandbox.with_files(&[EmptyFile("single.001.jpg"), EmptyFile("normal.txt")]);
+
+        let actual = nu!(cwd: dirs.test(), "ls --sequences | get name | to text");
+
+        // Single numbered file should not be collapsed into sequence
+        assert!(actual.out.contains("single.001.jpg"));
+        assert!(actual.out.contains("normal.txt"));
+    })
+}

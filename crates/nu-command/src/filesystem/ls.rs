@@ -139,6 +139,8 @@ struct Args {
     directory: bool,
     use_mime_type: bool,
     use_threads: bool,
+    #[allow(dead_code)] // Used in run() but not in ls_for_one_pattern
+    sequences: bool,
     call_span: Span,
 }
 
@@ -185,6 +187,7 @@ impl Command for Ls {
             )
             .switch("mime-type", "Show mime-type in type column instead of 'file' (based on filenames only; files' contents are not examined)", Some('m'))
             .switch("threads", "Use multiple threads to list contents. Output will be non-deterministic.", Some('t'))
+            .switch("sequences", "Display file sequences in compact notation (e.g., file.*.ext@1-100)", Some('S'))
             .category(Category::FileSystem)
     }
 
@@ -203,6 +206,9 @@ impl Command for Ls {
         let directory = call.has_flag(engine_state, stack, "directory")?;
         let use_mime_type = call.has_flag(engine_state, stack, "mime-type")?;
         let use_threads = call.has_flag(engine_state, stack, "threads")?;
+        // Use config default for sequences if flag is not explicitly set
+        let sequences = call.has_flag(engine_state, stack, "sequences")?
+            || stack.get_config(engine_state).ls.use_sequences;
         let call_span = call.head;
         let cwd = engine_state.cwd(Some(stack))?.into_std_path_buf();
 
@@ -215,6 +221,7 @@ impl Command for Ls {
             directory,
             use_mime_type,
             use_threads,
+            sequences,
             call_span,
         };
 
@@ -224,18 +231,16 @@ impl Command for Ls {
         } else {
             Some(pattern_arg)
         };
-        match input_pattern_arg {
-            None => Ok(
-                ls_for_one_pattern(None, args, engine_state.signals().clone(), cwd)?
-                    .into_pipeline_data_with_metadata(
-                        call_span,
-                        engine_state.signals().clone(),
-                        PipelineMetadata {
-                            data_source: DataSource::Ls,
-                            ..Default::default()
-                        },
-                    ),
-            ),
+        let pipeline_data = match input_pattern_arg {
+            None => ls_for_one_pattern(None, args, engine_state.signals().clone(), cwd)?
+                .into_pipeline_data_with_metadata(
+                    call_span,
+                    engine_state.signals().clone(),
+                    PipelineMetadata {
+                        data_source: DataSource::Ls,
+                        ..Default::default()
+                    },
+                ),
             Some(pattern) => {
                 let mut result_iters = vec![];
                 for pat in pattern {
@@ -249,7 +254,7 @@ impl Command for Ls {
 
                 // Here nushell needs to use
                 // use `flatten` to chain all iterators into one.
-                Ok(result_iters
+                result_iters
                     .into_iter()
                     .flatten()
                     .into_pipeline_data_with_metadata(
@@ -259,8 +264,24 @@ impl Command for Ls {
                             data_source: DataSource::Ls,
                             ..Default::default()
                         },
-                    ))
+                    )
             }
+        };
+
+        if sequences {
+            // Collect all values, group into sequences, and return
+            let values: Vec<Value> = pipeline_data.into_iter().collect();
+            let grouped = group_into_sequences(values);
+            Ok(grouped.into_iter().into_pipeline_data_with_metadata(
+                call_span,
+                engine_state.signals().clone(),
+                PipelineMetadata {
+                    data_source: DataSource::Ls,
+                    ..Default::default()
+                },
+            ))
+        } else {
+            Ok(pipeline_data)
         }
     }
 
@@ -316,6 +337,11 @@ impl Command for Ls {
                 example: "['/path/to/directory' '/path/to/file'] | each {|| ls -D $in } | flatten",
                 result: None,
             },
+            Example {
+                description: "Display file sequences in compact notation",
+                example: "ls --sequences",
+                result: None,
+            },
         ]
     }
 }
@@ -353,6 +379,7 @@ fn ls_for_one_pattern(
         directory,
         use_mime_type,
         use_threads,
+        sequences: _,
         call_span,
     } = args;
     let pattern_arg = {
@@ -1114,4 +1141,216 @@ fn read_dir(
         return Ok(Box::new(collected.into_iter()));
     }
     Ok(Box::new(items))
+}
+
+// Structure to represent a file sequence
+#[derive(Debug)]
+struct FileSequence {
+    prefix: String,
+    suffix: String,
+    frames: Vec<i64>,
+    padding: usize,
+}
+
+impl FileSequence {
+    fn to_compact_name(&self) -> String {
+        let wildcards = "*".repeat(self.padding);
+        let ranges = self.format_ranges();
+        format!("{}{}{}@{}", self.prefix, wildcards, self.suffix, ranges)
+    }
+
+    fn format_ranges(&self) -> String {
+        if self.frames.is_empty() {
+            return String::new();
+        }
+
+        let mut sorted_frames = self.frames.clone();
+        sorted_frames.sort_unstable();
+
+        let continuity_groups = group_continuity(&sorted_frames);
+
+        continuity_groups
+            .into_iter()
+            .map(|group| {
+                if group.len() == 1 {
+                    group[0].to_string()
+                } else {
+                    format!(
+                        "{}-{}",
+                        group.first().expect("group is not empty"),
+                        group.last().expect("group is not empty")
+                    )
+                }
+            })
+            .collect::<Vec<String>>()
+            .join(",")
+    }
+}
+
+/// Check the continuity of a numbers' series and return a vector of vectors
+/// with the continuity groups.
+/// Inspired by framels (fls) implementation.
+fn group_continuity(data: &[i64]) -> Vec<Vec<i64>> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+
+    let mut result: Vec<Vec<i64>> = Vec::new();
+    let mut slice_start: usize = 0;
+
+    for i in 1..data.len() {
+        if data[i - 1] + 1 != data[i] {
+            result.push(data[slice_start..i].to_vec());
+            slice_start = i;
+        }
+    }
+
+    // Don't forget the last group
+    result.push(data[slice_start..].to_vec());
+
+    result
+}
+
+/// Extract numeric sequence from filename using VFX/animation conventions.
+/// Pattern: prefix + separator (. or _) + frame digits (2-9) + . + extension (2-5 chars)
+/// Example: render_0001.exr -> ("render_", ".exr", 1, 4)
+/// Inspired by framels (fls) implementation.
+fn extract_sequence_parts(filename: &str) -> Option<(String, String, i64, usize)> {
+    let bytes = filename.as_bytes();
+    let len = bytes.len();
+
+    // Need at least: 1 char prefix + separator + 2 digits + . + 2 char ext = 7 chars minimum
+    if len < 7 {
+        return None;
+    }
+
+    // Find the last dot (extension separator)
+    let ext_dot = bytes.iter().rposition(|&b| b == b'.')?;
+
+    // Validate extension length (2-5 characters)
+    let ext_len = len - ext_dot - 1;
+    if !(2..=5).contains(&ext_len) {
+        return None;
+    }
+
+    // Find the frame number: digits immediately before the extension dot
+    let frame_end = ext_dot;
+    let mut frame_start = ext_dot;
+
+    while frame_start > 0 && bytes[frame_start - 1].is_ascii_digit() {
+        frame_start -= 1;
+    }
+
+    let digit_count = frame_end - frame_start;
+
+    // Validate digit count (2-9 digits for VFX conventions)
+    if !(2..=9).contains(&digit_count) {
+        return None;
+    }
+
+    // Check for valid separator (. or _) before the frame number
+    if frame_start == 0 {
+        return None;
+    }
+    let separator = bytes[frame_start - 1];
+    if separator != b'.' && separator != b'_' {
+        return None;
+    }
+
+    // Parse frame number
+    let frame_str = &filename[frame_start..frame_end];
+    let frame_num: i64 = frame_str.parse().ok()?;
+
+    // Build prefix (everything up to and including the separator)
+    let prefix = &filename[..frame_start];
+    // Build suffix (extension including the dot)
+    let suffix = &filename[ext_dot..];
+
+    Some((
+        prefix.to_string(),
+        suffix.to_string(),
+        frame_num,
+        digit_count,
+    ))
+}
+
+// Group files into sequences
+fn group_into_sequences(values: Vec<Value>) -> Vec<Value> {
+    use std::collections::HashMap;
+
+    let mut sequences: HashMap<(String, String, usize), Vec<(i64, Value)>> = HashMap::new();
+    let mut non_sequence_files = Vec::new();
+
+    for value in values {
+        if let Ok(record) = value.as_record() {
+            if let Some(name_value) = record.get("name") {
+                if let Ok(name) = name_value.coerce_str() {
+                    if let Some((prefix, suffix, frame, padding)) = extract_sequence_parts(&name) {
+                        let key = (prefix.clone(), suffix.clone(), padding);
+                        sequences.entry(key).or_default().push((frame, value));
+                    } else {
+                        non_sequence_files.push(value);
+                    }
+                } else {
+                    non_sequence_files.push(value);
+                }
+            } else {
+                non_sequence_files.push(value);
+            }
+        } else {
+            non_sequence_files.push(value);
+        }
+    }
+
+    let mut result = Vec::new();
+
+    // Add sequences
+    for ((prefix, suffix, padding), mut files) in sequences {
+        // Only treat as sequence if there are at least 2 frames
+        if files.len() > 1 {
+            // Extract frame numbers for compact notation
+            let frames: Vec<i64> = files.iter().map(|(f, _)| *f).collect();
+            let seq = FileSequence {
+                prefix,
+                suffix,
+                frames,
+                padding,
+            };
+            let compact_name = seq.to_compact_name();
+            let span = Span::unknown();
+            let mut record = Record::new();
+            record.push("name", Value::string(compact_name, span));
+            record.push("type", Value::string("sequence", span));
+            record.push("size", Value::nothing(span));
+            record.push("modified", Value::nothing(span));
+            result.push(Value::record(record, span));
+        } else {
+            // Single file - keep original value with all metadata
+            if let Some((_, original_value)) = files.pop() {
+                result.push(original_value);
+            }
+        }
+    }
+
+    // Add non-sequence files
+    result.extend(non_sequence_files);
+
+    // Sort by name
+    result.sort_by(|a, b| {
+        let a_name = a
+            .as_record()
+            .ok()
+            .and_then(|r| r.get("name"))
+            .and_then(|v| v.coerce_str().ok())
+            .unwrap_or_default();
+        let b_name = b
+            .as_record()
+            .ok()
+            .and_then(|r| r.get("name"))
+            .and_then(|v| v.coerce_str().ok())
+            .unwrap_or_default();
+        a_name.cmp(&b_name)
+    });
+
+    result
 }
