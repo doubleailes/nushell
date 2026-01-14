@@ -1165,8 +1165,8 @@ impl FileSequence {
         sorted_frames.sort_unstable();
 
         let mut ranges = Vec::new();
-        let mut start = sorted_frames[0];
-        let mut end = sorted_frames[0];
+        let mut start = *sorted_frames.first().expect("frames is not empty");
+        let mut end = start;
 
         for &frame in sorted_frames.iter().skip(1) {
             if frame == end + 1 {
