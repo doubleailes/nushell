@@ -139,6 +139,7 @@ struct Args {
     directory: bool,
     use_mime_type: bool,
     use_threads: bool,
+    #[allow(dead_code)] // Used in run() but not in ls_for_one_pattern
     sequences: bool,
     call_span: Span,
 }
@@ -1164,65 +1165,111 @@ impl FileSequence {
         let mut sorted_frames = self.frames.clone();
         sorted_frames.sort_unstable();
 
-        let mut ranges = Vec::new();
-        let mut start = *sorted_frames.first().expect("frames is not empty");
-        let mut end = start;
+        let continuity_groups = group_continuity(&sorted_frames);
 
-        for &frame in sorted_frames.iter().skip(1) {
-            if frame == end + 1 {
-                end = frame;
-            } else {
-                ranges.push(if start == end {
-                    format!("{}", start)
+        continuity_groups
+            .into_iter()
+            .map(|group| {
+                if group.len() == 1 {
+                    group[0].to_string()
                 } else {
-                    format!("{}-{}", start, end)
-                });
-                start = frame;
-                end = frame;
-            }
-        }
-
-        ranges.push(if start == end {
-            format!("{}", start)
-        } else {
-            format!("{}-{}", start, end)
-        });
-
-        ranges.join(",")
+                    format!(
+                        "{}-{}",
+                        group.first().expect("group is not empty"),
+                        group.last().expect("group is not empty")
+                    )
+                }
+            })
+            .collect::<Vec<String>>()
+            .join(",")
     }
 }
 
-// Extract numeric sequence from filename
-fn extract_sequence_parts(filename: &str) -> Option<(String, String, i64, usize)> {
-    // Find all numeric sequences in the filename
-    let mut best_match: Option<(usize, usize, i64, usize)> = None;
-    let chars: Vec<char> = filename.chars().collect();
-    let mut i = 0;
+/// Check the continuity of a numbers' series and return a vector of vectors
+/// with the continuity groups.
+/// Inspired by framels (fls) implementation.
+fn group_continuity(data: &[i64]) -> Vec<Vec<i64>> {
+    if data.is_empty() {
+        return Vec::new();
+    }
 
-    while i < chars.len() {
-        if chars[i].is_ascii_digit() {
-            let start = i;
-            while i < chars.len() && chars[i].is_ascii_digit() {
-                i += 1;
-            }
-            let num_str: String = chars[start..i].iter().collect();
-            if let Ok(num) = num_str.parse::<i64>() {
-                let padding = num_str.len();
-                // Prefer sequences with more digits (longer padding)
-                if best_match.is_none() || padding > best_match.as_ref().unwrap().3 {
-                    best_match = Some((start, i, num, padding));
-                }
-            }
-        } else {
-            i += 1;
+    let mut result: Vec<Vec<i64>> = Vec::new();
+    let mut slice_start: usize = 0;
+
+    for i in 1..data.len() {
+        if data[i - 1] + 1 != data[i] {
+            result.push(data[slice_start..i].to_vec());
+            slice_start = i;
         }
     }
 
-    best_match.map(|(start, end, num, padding)| {
-        let prefix: String = chars[..start].iter().collect();
-        let suffix: String = chars[end..].iter().collect();
-        (prefix, suffix, num, padding)
-    })
+    // Don't forget the last group
+    result.push(data[slice_start..].to_vec());
+
+    result
+}
+
+/// Extract numeric sequence from filename using VFX/animation conventions.
+/// Pattern: prefix + separator (. or _) + frame digits (2-9) + . + extension (2-5 chars)
+/// Example: render_0001.exr -> ("render_", ".exr", 1, 4)
+/// Inspired by framels (fls) implementation.
+fn extract_sequence_parts(filename: &str) -> Option<(String, String, i64, usize)> {
+    let bytes = filename.as_bytes();
+    let len = bytes.len();
+
+    // Need at least: 1 char prefix + separator + 2 digits + . + 2 char ext = 7 chars minimum
+    if len < 7 {
+        return None;
+    }
+
+    // Find the last dot (extension separator)
+    let ext_dot = bytes.iter().rposition(|&b| b == b'.')?;
+
+    // Validate extension length (2-5 characters)
+    let ext_len = len - ext_dot - 1;
+    if !(2..=5).contains(&ext_len) {
+        return None;
+    }
+
+    // Find the frame number: digits immediately before the extension dot
+    let frame_end = ext_dot;
+    let mut frame_start = ext_dot;
+
+    while frame_start > 0 && bytes[frame_start - 1].is_ascii_digit() {
+        frame_start -= 1;
+    }
+
+    let digit_count = frame_end - frame_start;
+
+    // Validate digit count (2-9 digits for VFX conventions)
+    if !(2..=9).contains(&digit_count) {
+        return None;
+    }
+
+    // Check for valid separator (. or _) before the frame number
+    if frame_start == 0 {
+        return None;
+    }
+    let separator = bytes[frame_start - 1];
+    if separator != b'.' && separator != b'_' {
+        return None;
+    }
+
+    // Parse frame number
+    let frame_str = &filename[frame_start..frame_end];
+    let frame_num: i64 = frame_str.parse().ok()?;
+
+    // Build prefix (everything up to and including the separator)
+    let prefix = &filename[..frame_start];
+    // Build suffix (extension including the dot)
+    let suffix = &filename[ext_dot..];
+
+    Some((
+        prefix.to_string(),
+        suffix.to_string(),
+        frame_num,
+        digit_count,
+    ))
 }
 
 // Group files into sequences
@@ -1236,14 +1283,9 @@ fn group_into_sequences(values: Vec<Value>) -> Vec<Value> {
         if let Ok(record) = value.as_record() {
             if let Some(name_value) = record.get("name") {
                 if let Ok(name) = name_value.coerce_str() {
-                    if let Some((prefix, suffix, frame, padding)) =
-                        extract_sequence_parts(&name)
-                    {
+                    if let Some((prefix, suffix, frame, padding)) = extract_sequence_parts(&name) {
                         let key = (prefix.clone(), suffix.clone(), padding);
-                        sequences
-                            .entry(key)
-                            .or_default()
-                            .push((frame, value));
+                        sequences.entry(key).or_default().push((frame, value));
                     } else {
                         non_sequence_files.push(value);
                     }
