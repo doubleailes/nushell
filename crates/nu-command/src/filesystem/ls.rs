@@ -206,7 +206,9 @@ impl Command for Ls {
         let directory = call.has_flag(engine_state, stack, "directory")?;
         let use_mime_type = call.has_flag(engine_state, stack, "mime-type")?;
         let use_threads = call.has_flag(engine_state, stack, "threads")?;
-        let sequences = call.has_flag(engine_state, stack, "sequences")?;
+        // Use config default for sequences if flag is not explicitly set
+        let sequences = call.has_flag(engine_state, stack, "sequences")?
+            || stack.get_config(engine_state).ls.use_sequences;
         let call_span = call.head;
         let cwd = engine_state.cwd(Some(stack))?.into_std_path_buf();
 

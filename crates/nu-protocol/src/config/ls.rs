@@ -5,6 +5,7 @@ use crate as nu_protocol;
 pub struct LsConfig {
     pub use_ls_colors: bool,
     pub clickable_links: bool,
+    pub use_sequences: bool,
 }
 
 impl Default for LsConfig {
@@ -12,6 +13,7 @@ impl Default for LsConfig {
         Self {
             use_ls_colors: true,
             clickable_links: true,
+            use_sequences: false,
         }
     }
 }
@@ -33,6 +35,7 @@ impl UpdateFromValue for LsConfig {
             match col.as_str() {
                 "use_ls_colors" => self.use_ls_colors.update(val, path, errors),
                 "clickable_links" => self.clickable_links.update(val, path, errors),
+                "use_sequences" => self.use_sequences.update(val, path, errors),
                 _ => errors.unknown_option(path, val),
             }
         }
