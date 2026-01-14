@@ -1229,7 +1229,7 @@ fn extract_sequence_parts(filename: &str) -> Option<(String, String, i64, usize)
 fn group_into_sequences(values: Vec<Value>) -> Vec<Value> {
     use std::collections::HashMap;
 
-    let mut sequences: HashMap<(String, String, usize), FileSequence> = HashMap::new();
+    let mut sequences: HashMap<(String, String, usize), Vec<(i64, Value)>> = HashMap::new();
     let mut non_sequence_files = Vec::new();
 
     for value in values {
@@ -1242,14 +1242,8 @@ fn group_into_sequences(values: Vec<Value>) -> Vec<Value> {
                         let key = (prefix.clone(), suffix.clone(), padding);
                         sequences
                             .entry(key)
-                            .or_insert_with(|| FileSequence {
-                                prefix,
-                                suffix,
-                                frames: Vec::new(),
-                                padding,
-                            })
-                            .frames
-                            .push(frame);
+                            .or_insert_with(Vec::new)
+                            .push((frame, value));
                     } else {
                         non_sequence_files.push(value);
                     }
@@ -1267,9 +1261,17 @@ fn group_into_sequences(values: Vec<Value>) -> Vec<Value> {
     let mut result = Vec::new();
 
     // Add sequences
-    for ((prefix, suffix, padding), seq) in sequences {
+    for ((prefix, suffix, padding), mut files) in sequences {
         // Only treat as sequence if there are at least 2 frames
-        if seq.frames.len() > 1 {
+        if files.len() > 1 {
+            // Extract frame numbers for compact notation
+            let frames: Vec<i64> = files.iter().map(|(f, _)| *f).collect();
+            let seq = FileSequence {
+                prefix,
+                suffix,
+                frames,
+                padding,
+            };
             let compact_name = seq.to_compact_name();
             let span = Span::unknown();
             let mut record = Record::new();
@@ -1279,19 +1281,10 @@ fn group_into_sequences(values: Vec<Value>) -> Vec<Value> {
             record.push("modified", Value::nothing(span));
             result.push(Value::record(record, span));
         } else {
-            // Single file, reconstruct original name
-            let frame = seq.frames[0];
-            let original_name = format!("{}{:0width$}{}", prefix, frame, suffix, width = padding);
-            // Find and add the original value
-            // This is a bit inefficient but ensures we preserve all metadata
-            // For now, we'll just create a simple entry
-            let span = Span::unknown();
-            let mut record = Record::new();
-            record.push("name", Value::string(original_name, span));
-            record.push("type", Value::string("file", span));
-            record.push("size", Value::nothing(span));
-            record.push("modified", Value::nothing(span));
-            result.push(Value::record(record, span));
+            // Single file - keep original value with all metadata
+            if let Some((_, original_value)) = files.pop() {
+                result.push(original_value);
+            }
         }
     }
 
