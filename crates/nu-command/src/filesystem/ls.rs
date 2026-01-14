@@ -1242,7 +1242,7 @@ fn group_into_sequences(values: Vec<Value>) -> Vec<Value> {
                         let key = (prefix.clone(), suffix.clone(), padding);
                         sequences
                             .entry(key)
-                            .or_insert_with(Vec::new)
+                            .or_default()
                             .push((frame, value));
                     } else {
                         non_sequence_files.push(value);
