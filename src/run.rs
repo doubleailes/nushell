@@ -26,6 +26,7 @@ pub(crate) fn run_commands(
 
     let start_time = std::time::Instant::now();
     let create_scaffold = nu_path::nu_config_dir().is_some_and(|p| !p.exists());
+    let is_interactive = parsed_nu_cli_args.interactive_shell.is_some();
 
     // if the --no-config-file(-n) option is NOT passed, load the plugin file,
     // load the default env file or custom (depending on parsed_nu_cli_args.env_file),
@@ -39,8 +40,12 @@ pub(crate) fn run_commands(
         perf!("read plugins", start_time, use_color);
 
         let start_time = std::time::Instant::now();
-        // If we have a env file parameter *OR* we have a login shell parameter, read the env file
-        if parsed_nu_cli_args.env_file.is_some() || parsed_nu_cli_args.login_shell.is_some() {
+        // If we have a env file parameter *OR* we have a login shell parameter *OR*
+        // we are in interactive mode, read the env file
+        if parsed_nu_cli_args.env_file.is_some()
+            || parsed_nu_cli_args.login_shell.is_some()
+            || is_interactive
+        {
             config_files::read_config_file(
                 engine_state,
                 &mut stack,
@@ -58,8 +63,12 @@ pub(crate) fn run_commands(
         let start_time = std::time::Instant::now();
         let create_scaffold = nu_path::nu_config_dir().is_some_and(|p| !p.exists());
 
-        // If we have a config file parameter *OR* we have a login shell parameter, read the config file
-        if parsed_nu_cli_args.config_file.is_some() || parsed_nu_cli_args.login_shell.is_some() {
+        // If we have a config file parameter *OR* we have a login shell parameter *OR*
+        // we are in interactive mode, read the config file
+        if parsed_nu_cli_args.config_file.is_some()
+            || parsed_nu_cli_args.login_shell.is_some()
+            || is_interactive
+        {
             config_files::read_config_file(
                 engine_state,
                 &mut stack,
@@ -79,6 +88,14 @@ pub(crate) fn run_commands(
         }
 
         perf!("read login.nu", start_time, use_color);
+
+        // If we are in interactive mode or login shell, load vendor and user
+        // autoload files, consistent with the REPL behavior
+        if is_interactive || parsed_nu_cli_args.login_shell.is_some() {
+            let start_time = std::time::Instant::now();
+            config_files::read_vendor_autoload_files(engine_state, &mut stack);
+            perf!("read vendor autoload", start_time, use_color);
+        }
     }
 
     // Before running commands, set up the startup time

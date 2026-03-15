@@ -345,6 +345,86 @@ fn interactive_and_login_flags_run() -> TestResult {
 }
 
 #[test]
+fn interactive_flag_loads_config_with_commands() -> TestResult {
+    // When -i is combined with -c, config files (env.nu, config.nu) should be loaded,
+    // consistent with interactive REPL behavior. See #7442.
+    let config_dir = tempfile::tempdir()?;
+    let config_path = config_dir.path().join("env.nu");
+    std::fs::write(&config_path, "$env.TEST_INTERACTIVE_ENV = 'loaded'")?;
+
+    let mut cmd = Command::new(cargo_bin!());
+    let output = cmd
+        .args([
+            "--no-std-lib",
+            "--env-config",
+            config_path.to_str().unwrap(),
+            "-i",
+            "-c",
+            "print $env.TEST_INTERACTIVE_ENV",
+        ])
+        .output()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(
+        stdout.contains("loaded"),
+        "Expected env.nu to be loaded in interactive -c mode, got: {stdout}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn interactive_flag_loads_vendor_autoload_with_commands() -> TestResult {
+    // When -i is combined with -c, vendor/user autoload directories should be loaded.
+    // This fixes the core issue in #13635.
+    let autoload_dir = tempfile::tempdir()?;
+    let autoload_file = autoload_dir.path().join("test_autoload.nu");
+    std::fs::write(&autoload_file, "$env.TEST_AUTOLOAD = 'autoloaded'")?;
+
+    let mut cmd = Command::new(cargo_bin!());
+    let output = cmd
+        .args(["--no-std-lib", "-i", "-c", "print $env.TEST_AUTOLOAD"])
+        .env("NU_VENDOR_AUTOLOAD_DIR", autoload_dir.path())
+        .output()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(
+        stdout.contains("autoloaded"),
+        "Expected vendor autoload to run in interactive -c mode, got: {stdout}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn non_interactive_commands_skip_config() -> TestResult {
+    // Without -i, running with -c should NOT load config.nu (existing behavior preserved).
+    let config_dir = tempfile::tempdir()?;
+    let config_path = config_dir.path().join("config.nu");
+    std::fs::write(&config_path, "$env.SHOULD_NOT_LOAD = 'oops'")?;
+
+    let mut cmd = Command::new(cargo_bin!());
+    let output = cmd
+        .args([
+            "--no-std-lib",
+            "-c",
+            "print ($env | get -i SHOULD_NOT_LOAD | default 'not_loaded')",
+        ])
+        .output()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(
+        stdout.contains("not_loaded"),
+        "Config should NOT be loaded without -i flag, got: {stdout}"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn no_newline_flag_suppresses_newline() -> TestResult {
     let mut cmd = Command::new(cargo_bin!());
     let output = cmd
